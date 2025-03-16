@@ -1,16 +1,13 @@
 use crate::{Cursor, Dir, Mode};
+use crossterm::{
+    cursor::{Hide, MoveTo},
+    event::{read, Event, KeyCode, KeyModifiers},
+    style::{Color, SetForegroundColor},
+    terminal::{window_size, Clear, ClearType},
+};
 use std::{
     fs::File,
     io::{BufWriter, Stdout, Write},
-};
-use termion::{
-    clear::All,
-    color::{Fg, Reset, Rgb},
-    cursor::{Goto, Hide},
-    event::Key,
-    input::Keys,
-    raw::RawTerminal,
-    terminal_size, AsyncReader,
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -38,33 +35,31 @@ impl Normal {
             diff,
         };
     }
-    pub fn run(
-        &mut self,
-        stdout: &mut RawTerminal<Stdout>,
-        stdin: &mut Keys<AsyncReader>,
-        mode: &mut Mode,
-        dir: &Dir,
-    ) -> bool {
+    pub fn run(&mut self, stdout: &mut Stdout, mode: &mut Mode, dir: &Dir) -> bool {
         self.diff = self.buffer.eq(&self.buffer0);
         self.line = self.buffer[self.cursor.y].clone();
         self.max = self.buffer.len() - 1;
         self.output(stdout, dir);
-        return self.input(stdout, stdin, mode, dir);
+        return self.input(stdout, mode, dir);
     }
-    fn output(&mut self, stdout: &mut RawTerminal<Stdout>, dir: &Dir) {
-        let (_width, height) = terminal_size().unwrap();
+    fn output(&mut self, stdout: &mut Stdout, dir: &Dir) {
+        let height = window_size().unwrap().height;
         let lines = self.buffer.len().to_string().len();
-        write!(stdout, "{}", All).unwrap();
+        write!(stdout, "{}", Clear(ClearType::All)).unwrap();
         for i in 0..self.buffer.len() {
             let line = self.buffer[i].clone();
             write!(
                 stdout,
                 "{}{}{}{}{} {}",
-                Goto(1, i as u16 + 1),
+                MoveTo(0, i as u16),
                 " ".repeat(lines - (i + 1).to_string().len()),
-                Fg(Rgb(127, 127, 127)),
+                SetForegroundColor(Color::Rgb {
+                    r: 127,
+                    g: 127,
+                    b: 127
+                }),
                 i + 1,
-                Fg(Reset),
+                SetForegroundColor(Color::Reset),
                 line
             )
             .unwrap();
@@ -75,80 +70,70 @@ impl Normal {
             &dir.path
         };
         let msg = if self.diff { "" } else { "変更済み" };
-        write!(stdout, "{}[{}]{}", Goto(1, height - 1), path, msg).unwrap();
+        write!(stdout, "{}[{}]{}", MoveTo(0, height - 2), path, msg).unwrap();
         write!(
             stdout,
             "{}",
-            Goto((self.cursor.x + 2 + lines) as u16, self.cursor.y as u16 + 1)
+            MoveTo((self.cursor.x + 1 + lines) as u16, self.cursor.y as u16)
         )
         .unwrap();
         stdout.flush().unwrap();
     }
-    fn input(
-        &mut self,
-        stdout: &mut RawTerminal<Stdout>,
-        stdin: &mut Keys<AsyncReader>,
-        mode: &mut Mode,
-        dir: &Dir,
-    ) -> bool {
-        if let Some(Ok(key)) = stdin.next() {
-            match key {
-                Key::Backspace => {
+    fn input(&mut self, stdout: &mut Stdout, mode: &mut Mode, dir: &Dir) -> bool {
+        if let Ok(Event::Key(key)) = read() {
+            match key.code {
+                KeyCode::Backspace => {
                     self.delete();
                 }
-                Key::Char(c) => match c {
-                    '\n' => {
-                        self.new_line();
-                    }
-                    _ => {
+                KeyCode::Char(c) => {
+                    if key.modifiers == KeyModifiers::CONTROL {
+                        match c {
+                            's' => {
+                                if dir.path.is_empty() {
+                                    self.save_as(mode, stdout);
+                                } else {
+                                    self.save(&dir.path);
+                                }
+                            }
+                            'a' => {
+                                self.save_as(mode, stdout);
+                            }
+                            'q' => {
+                                return true;
+                            }
+                            _ => {}
+                        }
+                    } else {
                         self.typing(c);
                     }
-                },
-                Key::Up => {
+                }
+                KeyCode::Up => {
                     self.up();
                 }
-                Key::Down => {
+                KeyCode::Down => {
                     self.down();
                 }
-                Key::Left => {
+                KeyCode::Left => {
                     self.left();
                 }
-                Key::Right => {
+                KeyCode::Right => {
                     self.right();
                 }
-                Key::Ctrl(c) => match c {
-                    's' => {
-                        if dir.path.is_empty() {
-                            self.save_as(mode, stdout);
-                        } else {
-                            self.save(&dir.path);
-                        }
-                    }
-                    'S' => {
-                        self.save_as(mode, stdout);
-                    }
-                    'q' => {
-                        return true;
-                    }
-                    _ => {}
-                },
+                KeyCode::Enter => {
+                    self.new_line();
+                }
                 _ => {}
             }
         }
         return false;
     }
     fn save(&mut self, path: &String) {
-        let file = File::create(&path).unwrap();
+        let file = File::create(path).unwrap();
         let mut writer = BufWriter::new(file);
-        writer.write(self.buffer[0].as_bytes()).unwrap();
-        for i in 1..self.buffer.len() {
-            let line = self.buffer[i].as_bytes();
-            writer.write(&[10]).unwrap();
-            writer.write(line).unwrap();
-        }
+        write!(writer, "{}\n", self.buffer.join("\n")).unwrap();
         self.buffer0 = self.buffer.clone();
     }
-    fn save_as(&mut self, mode: &mut Mode, stdout: &mut RawTerminal<Stdout>) {
+    fn save_as(&mut self, mode: &mut Mode, stdout: &mut Stdout) {
         write!(stdout, "{}", Hide).unwrap();
         *mode = Mode::WritePath;
     }
@@ -172,11 +157,12 @@ impl Normal {
             let mut buffer1 = self.buffer[0..self.cursor.y].to_vec();
             let buffer2 = self.buffer[self.cursor.y].clone();
             let buffer3 = self.buffer[self.cursor.y + 1..].to_vec();
+            let l = buffer1[self.cursor.y - 1].width();
             buffer1[self.cursor.y - 1].push_str(&buffer2);
             buffer1.extend(buffer3);
             self.buffer = buffer1;
             self.cursor.y -= 1;
-            self.cursor.x = self.buffer[self.cursor.y].width();
+            self.cursor.x = l;
         }
     }
     fn new_line(&mut self) {
@@ -200,17 +186,21 @@ impl Normal {
         self.cursor.x = 0;
     }
     fn typing(&mut self, c: char) {
-        let mut w = String::new();
-        for c in self.line.chars() {
-            w.push(c);
-            if w.width() >= self.cursor.x {
-                break;
+        if 0 < self.cursor.x {
+            let mut w = String::new();
+            for c in self.line.chars() {
+                w.push(c);
+                if w.width() >= self.cursor.x {
+                    break;
+                }
             }
+            let l = w.len();
+            let line1 = &self.line[0..l];
+            let line2 = &self.line[l..];
+            self.buffer[self.cursor.y] = format!("{}{}{}", line1, c, line2);
+        } else {
+            self.buffer[self.cursor.y] = format!("{}{}", c, self.line);
         }
-        let l = w.len();
-        let line1 = &self.line[0..l];
-        let line2 = &self.line[l..];
-        self.buffer[self.cursor.y] = format!("{}{}{}", line1, c, line2);
         self.cursor.x += UnicodeWidthChar::width(c).unwrap();
     }
     fn up(&mut self) {

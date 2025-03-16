@@ -5,7 +5,7 @@ use std::{
 
 pub struct Dir {
     pub path: String,
-    dir_path: PathBuf,
+    pub dir_path: PathBuf,
     pub dirs: Vec<DirEntry>,
     pub files: Vec<DirEntry>,
 }
@@ -32,5 +32,21 @@ impl Dir {
             dirs,
             files,
         };
+    }
+    pub fn set(&mut self) {
+        self.dirs.clear();
+        self.files.clear();
+        for i in read_dir(&self.dir_path).unwrap() {
+            let f = i.unwrap();
+            if f.file_type().unwrap().is_dir() {
+                self.dirs.push(f);
+            } else {
+                self.files.push(f);
+            }
+        }
+        self.dirs
+            .sort_by_key(|item| item.file_name().to_str().unwrap().to_string());
+        self.files
+            .sort_by_key(|item| item.file_name().to_str().unwrap().to_string());
     }
 }
